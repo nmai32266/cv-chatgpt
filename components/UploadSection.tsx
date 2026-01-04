@@ -3,6 +3,128 @@ import React, { useRef, useState, useEffect } from 'react';
 import { UploadCloud, FileText, Search, X } from 'lucide-react';
 import { UploadState } from '../types';
 
+// Cache pdfjs để tránh load nhiều lần
+let pdfjsLib: any = null;
+
+// Load pdf.js - ưu tiên từ window (đã load trong HTML), sau đó thử ESM
+const loadPdfJs = async (): Promise<any> => {
+  if (pdfjsLib) return pdfjsLib;
+  
+  // Version pdf.js để sử dụng
+  const PDFJS_VERSION = '3.11.174';
+  // Sử dụng unpkg cho worker vì có nhiều version hơn
+  const WORKER_URL = `https://unpkg.com/pdfjs-dist@${PDFJS_VERSION}/build/pdf.worker.min.js`;
+  
+  // Kiểm tra xem đã có trên window chưa (từ script tag trong HTML)
+  if ((window as any).pdfjsLib) {
+    pdfjsLib = (window as any).pdfjsLib;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER_URL;
+    return pdfjsLib;
+  }
+  
+  // Thử từ global pdfjs
+  if ((window as any).pdfjs) {
+    pdfjsLib = (window as any).pdfjs;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER_URL;
+    return pdfjsLib;
+  }
+  
+  // Thử import từ ESM (từ importmap)
+  try {
+    const pdfjsModule = await import('pdfjs-dist');
+    pdfjsLib = pdfjsModule.default || pdfjsModule;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER_URL;
+    return pdfjsLib;
+  } catch (error) {
+    console.error('Lỗi load pdfjs:', error);
+    throw new Error('Không thể load thư viện PDF.js. Vui lòng kiểm tra kết nối mạng.');
+  }
+};
+
+/**
+ * Chuyển đổi PDF sang PNG sử dụng pdf.js từ CDN
+ * @param file - File PDF
+ * @returns Promise<string> - Base64 string của PNG
+ */
+const convertPdfToPng = async (file: File): Promise<string> => {
+  try {
+    console.log('Bắt đầu chuyển đổi PDF:', file.name);
+    
+    // Load pdfjs
+    const pdfjs = await loadPdfJs();
+    console.log('Đã load pdfjs:', !!pdfjs);
+    
+    if (!pdfjs || !pdfjs.getDocument) {
+      throw new Error('pdfjs không có method getDocument');
+    }
+    
+    const arrayBuffer = await file.arrayBuffer();
+    console.log('Đã đọc file, kích thước:', arrayBuffer.byteLength);
+    
+    // Load PDF document
+    const loadingTask = pdfjs.getDocument({ 
+      data: arrayBuffer,
+      verbosity: 0 // Giảm log
+    });
+    
+    const pdf = await loadingTask.promise;
+    console.log('Đã load PDF, số trang:', pdf.numPages);
+    
+    if (pdf.numPages === 0) {
+      throw new Error('PDF không có trang nào');
+    }
+    
+    // Lấy trang đầu tiên
+    const page = await pdf.getPage(1);
+    console.log('Đã lấy trang đầu tiên');
+    
+    // Tính toán viewport với scale phù hợp
+    const scale = 2.0; // Scale cao hơn cho chất lượng tốt
+    const viewport = page.getViewport({ scale });
+    console.log('Viewport size:', viewport.width, 'x', viewport.height);
+    
+    // Tạo canvas
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('Không thể tạo canvas context');
+    }
+    
+    canvas.height = viewport.height;
+    canvas.width = viewport.width;
+    console.log('Canvas size:', canvas.width, 'x', canvas.height);
+    
+    // Render PDF page vào canvas
+    const renderContext = {
+      canvasContext: context,
+      viewport: viewport
+    };
+    
+    console.log('Bắt đầu render PDF vào canvas...');
+    await page.render(renderContext).promise;
+    console.log('Đã render xong');
+    
+    // Chuyển canvas thành base64 PNG
+    const dataUrl = canvas.toDataURL('image/png');
+    const base64Content = dataUrl.split(',')[1];
+    
+    if (!base64Content || base64Content.length === 0) {
+      throw new Error('Không thể tạo ảnh từ canvas');
+    }
+    
+    console.log('Đã tạo PNG, kích thước base64:', base64Content.length);
+    return base64Content;
+  } catch (error) {
+    console.error('Lỗi chuyển đổi PDF:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Lỗi không xác định';
+    throw new Error(
+      `Không thể chuyển đổi PDF sang ảnh: ${errorMessage}. ` +
+      `Vui lòng thử lại hoặc chuyển PDF sang ảnh thủ công (chụp màn hình hoặc xuất PDF sang PNG/JPG).`
+    );
+  }
+};
+
+
 interface UploadSectionProps {
   onAnalyze: (state: UploadState) => void;
   isAnalyzing: boolean;
@@ -89,64 +211,79 @@ const UploadSection: React.FC<UploadSectionProps> = ({ onAnalyze, isAnalyzing, i
 
     setError(null);
 
-    // Normalize MIME type for iOS compatibility
-    let normalizedMimeType = file.type;
-    if (!normalizedMimeType || normalizedMimeType === '' || normalizedMimeType === 'application/octet-stream') {
-      const fileName = file.name.toLowerCase();
-      if (fileName.endsWith('.pdf')) {
-        normalizedMimeType = 'application/pdf';
-      } else if (fileName.endsWith('.png')) {
-        normalizedMimeType = 'image/png';
-      } else if (fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')) {
-        normalizedMimeType = 'image/jpeg';
-      } else if (fileName.endsWith('.webp')) {
-        normalizedMimeType = 'image/webp';
-      } else {
-        normalizedMimeType = 'application/pdf'; // Default fallback
-      }
-    }
-    
-    // Normalize jpg to jpeg for consistency
-    if (normalizedMimeType === 'image/jpg') {
-      normalizedMimeType = 'image/jpeg';
-    }
-
-    // Use Promise-based FileReader for better error handling on iOS
     try {
-      const base64Content = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        
-        reader.onload = () => {
-          const base64String = reader.result as string;
-          if (!base64String || !base64String.includes(',')) {
-            reject(new Error("Không thể đọc tệp. Vui lòng thử lại."));
-            return;
+      let base64Content: string;
+      let finalMimeType: string;
+      let finalFileName: string = file.name;
+
+      // Kiểm tra nếu là PDF, chuyển đổi sang PNG
+      const isPdf = file.type === 'application/pdf' || 
+                    file.name.toLowerCase().endsWith('.pdf');
+
+      if (isPdf) {
+        // Chuyển PDF sang PNG
+        base64Content = await convertPdfToPng(file);
+        finalMimeType = 'image/png';
+        finalFileName = file.name.replace(/\.pdf$/i, '.png');
+      } else {
+        // Normalize MIME type for iOS compatibility
+        let normalizedMimeType = file.type;
+        if (!normalizedMimeType || normalizedMimeType === '' || normalizedMimeType === 'application/octet-stream') {
+          const fileName = file.name.toLowerCase();
+          if (fileName.endsWith('.png')) {
+            normalizedMimeType = 'image/png';
+          } else if (fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')) {
+            normalizedMimeType = 'image/jpeg';
+          } else if (fileName.endsWith('.webp')) {
+            normalizedMimeType = 'image/webp';
+          } else {
+            normalizedMimeType = 'image/png'; // Default fallback
           }
-          const content = base64String.split(',')[1];
-          if (!content || content.length === 0) {
-            reject(new Error("Tệp rỗng hoặc không hợp lệ."));
-            return;
-          }
-          resolve(content);
-        };
+        }
         
-        reader.onerror = () => {
-          reject(new Error("Không thể đọc tệp. Vui lòng thử lại với tệp khác."));
-        };
-        
-        reader.onabort = () => {
-          reject(new Error("Đã hủy đọc tệp."));
-        };
-        
-        // Start reading the file
-        reader.readAsDataURL(file);
-      });
+        // Normalize jpg to jpeg for consistency
+        if (normalizedMimeType === 'image/jpg') {
+          normalizedMimeType = 'image/jpeg';
+        }
+
+        finalMimeType = normalizedMimeType;
+
+        // Use Promise-based FileReader for better error handling on iOS
+        base64Content = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          
+          reader.onload = () => {
+            const base64String = reader.result as string;
+            if (!base64String || !base64String.includes(',')) {
+              reject(new Error("Không thể đọc tệp. Vui lòng thử lại."));
+              return;
+            }
+            const content = base64String.split(',')[1];
+            if (!content || content.length === 0) {
+              reject(new Error("Tệp rỗng hoặc không hợp lệ."));
+              return;
+            }
+            resolve(content);
+          };
+          
+          reader.onerror = () => {
+            reject(new Error("Không thể đọc tệp. Vui lòng thử lại với tệp khác."));
+          };
+          
+          reader.onabort = () => {
+            reject(new Error("Đã hủy đọc tệp."));
+          };
+          
+          // Start reading the file
+          reader.readAsDataURL(file);
+        });
+      }
       
       onAnalyze({
         fileData: base64Content,
         targetJob: targetJob,
-        mimeType: normalizedMimeType,
-        fileName: file.name
+        mimeType: finalMimeType,
+        fileName: finalFileName
       });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "Không thể đọc tệp. Vui lòng thử lại.";

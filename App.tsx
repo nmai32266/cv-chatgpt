@@ -107,8 +107,11 @@ const App: React.FC = () => {
       setApplications(prev => [scanActivity, ...prev]);
       
     } catch (error) {
-      console.error(error);
-      alert("Đã xảy ra lỗi. Vui lòng thử lại!");
+      console.error("Lỗi phân tích CV:", error);
+      const errorMessage = error instanceof Error 
+        ? error.message 
+        : "Đã xảy ra lỗi không xác định. Vui lòng thử lại!";
+      alert(`Lỗi: ${errorMessage}`);
     } finally {
       setIsAnalyzing(false);
     }

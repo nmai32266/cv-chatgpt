@@ -38,21 +38,25 @@ Trả về JSON hợp lệ. Văn phong chuyên nghiệp, khích lệ.`;
 const createUserPrompt = (targetJob: string): string => {
   return `Vị trí công việc mục tiêu: ${targetJob || "Đánh giá tổng quát"}
 
-Hãy phân tích CV đính kèm và tạo lộ trình phát triển. Trả lời hoàn toàn bằng Tiếng Việt.
+**QUAN TRỌNG: BẠN PHẢI PHÂN TÍCH CV ĐÍNH KÈM VÀ CHỈ TRẢ VỀ JSON, KHÔNG CÓ TEXT NÀO KHÁC.**
 
-**YÊU CẦU QUAN TRỌNG:**
-- Trả về ĐÚNG định dạng JSON theo schema bên dưới
-- Tất cả các trường đều bắt buộc
-- candidateLevel: "Junior" | "Middle" | "Senior" | "Expert"
-- matchScore: số nguyên từ 0-100
-- strengths: mảng ít nhất 3-5 chuỗi
-- weaknesses: mảng ít nhất 3-5 chuỗi
-- detailedAnalysis: object với 7 trường bắt buộc
-- suggestedJobs: mảng ít nhất 2 items, mỗi item phải có "title", "description", và "provider" (tên công ty)
-- developmentRoadmap: object với 2 mảng (courses, projects), mỗi mảng ít nhất 2-3 items
-- aiAgentReview: Nhận xét chân thật, đánh giá thẳng vào điểm yếu trình bày CV (60-100 từ)
+Hãy phân tích CV đính kèm (file PDF hoặc hình ảnh) và tạo lộ trình phát triển. 
 
-**JSON Schema:**
+**YÊU CẦU BẮT BUỘC:**
+1. PHẢI phân tích CV trong hình ảnh/PDF đính kèm
+2. CHỈ trả về JSON hợp lệ, KHÔNG có text giải thích trước hoặc sau JSON
+3. KHÔNG được nói "chưa nhận được CV" - hãy phân tích bất kỳ nội dung nào bạn thấy trong hình ảnh
+4. Tất cả các trường đều bắt buộc và phải điền đầy đủ
+5. candidateLevel: "Junior" | "Middle" | "Senior" | "Expert"
+6. matchScore: số nguyên từ 0-100
+7. strengths: mảng ít nhất 3-5 chuỗi
+8. weaknesses: mảng ít nhất 3-5 chuỗi
+9. detailedAnalysis: object với 7 trường bắt buộc (mỗi trường 40-80 từ)
+10. suggestedJobs: mảng ít nhất 2 items, mỗi item phải có "title", "description", và "provider" (tên công ty)
+11. developmentRoadmap: object với 2 mảng (courses, projects), mỗi mảng ít nhất 2-3 items
+12. aiAgentReview: Nhận xét chân thật, đánh giá thẳng vào điểm yếu trình bày CV (60-100 từ)
+
+**CHỈ TRẢ VỀ JSON SAU ĐÂY (KHÔNG CÓ GÌ KHÁC):**
 {
   "candidateLevel": "string",
   "summary": "string",
@@ -162,6 +166,17 @@ export const analyzeCV = async (
     // Parse JSON response - có thể có markdown code blocks
     let jsonText = textContent.text.trim();
     
+    // Kiểm tra xem response có phải là JSON không
+    if (!jsonText.startsWith("{") && !jsonText.startsWith("[")) {
+      // Nếu không phải JSON, có thể là thông báo lỗi từ AI
+      console.error("API trả về text thay vì JSON:", jsonText.substring(0, 200));
+      throw new Error(
+        "API không trả về JSON hợp lệ. " +
+        "Có thể CV không được gửi đúng cách hoặc API không nhận diện được CV. " +
+        "Vui lòng thử lại với file CV khác (PDF hoặc hình ảnh rõ nét)."
+      );
+    }
+    
     // Loại bỏ markdown code blocks nếu có
     if (jsonText.startsWith("```json")) {
       jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
@@ -169,7 +184,24 @@ export const analyzeCV = async (
       jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
     }
 
-    const rawResult = JSON.parse(jsonText) as any;
+    // Tìm JSON object đầu tiên trong text (nếu có text thừa)
+    const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      jsonText = jsonMatch[0];
+    }
+
+    let rawResult: any;
+    try {
+      rawResult = JSON.parse(jsonText) as any;
+    } catch (parseError) {
+      console.error("Lỗi parse JSON:", parseError);
+      console.error("Text nhận được:", jsonText.substring(0, 500));
+      throw new Error(
+        "Không thể parse JSON từ response. " +
+        "API có thể đang trả về thông báo lỗi thay vì kết quả phân tích. " +
+        "Vui lòng kiểm tra lại file CV và thử lại."
+      );
+    }
 
     // Validate required fields
     if (
@@ -251,11 +283,18 @@ export const analyzeCV = async (
     console.error("Lỗi phân tích OpenAI:", error);
     
     // Cải thiện error message
-    if (error instanceof SyntaxError) {
-      throw new Error("Không thể parse JSON từ response. API có thể trả về format không đúng.");
+    if (error instanceof SyntaxError || error instanceof Error) {
+      // Nếu đã có message rõ ràng, giữ nguyên
+      if (error.message && error.message.length > 50) {
+        throw error;
+      }
+      throw new Error(
+        "Lỗi phân tích CV: " + (error.message || "Không thể xử lý response từ API. " +
+        "Vui lòng kiểm tra lại file CV (đảm bảo là PDF hoặc hình ảnh rõ nét) và thử lại.")
+      );
     }
     
-    throw error;
+    throw new Error("Đã xảy ra lỗi không xác định khi phân tích CV. Vui lòng thử lại.");
   }
 };
 
